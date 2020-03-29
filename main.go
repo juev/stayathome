@@ -6,13 +6,20 @@ import (
 	_ "expvar"
 	"net"
 	"net/http"
+
+	// "net/http/httptrace"
 	"os"
 	"os/signal"
 	"runtime"
 	"syscall"
 	"time"
 
+	httptrace "gopkg.in/DataDog/dd-trace-go.v1/contrib/net/http"
+
+	"github.com/DataDog/datadog-go/statsd"
 	"github.com/gorilla/mux"
+	"gopkg.in/DataDog/dd-trace-go.v1/ddtrace/tracer"
+
 	"go.uber.org/zap"
 )
 
@@ -31,6 +38,15 @@ func main() {
 		sugar.Fatal("Port is not defined")
 	}
 
+	c, err := statsd.New("127.0.0.1:8125")
+	if err != nil {
+		sugar.Fatalw("Cannot conect to statsd", err)
+	}
+	c.Namespace = "juevapp."
+
+	tracer.Start(tracer.WithEnv("juev"), tracer.WithAnalytics(true))
+	defer tracer.Stop()
+	sugar.Infow("tracer was started")
 	r := mux.NewRouter()
 	server := http.Server{
 		Addr:    net.JoinHostPort("", port),
@@ -38,7 +54,7 @@ func main() {
 	}
 
 	diagLogger := sugar.With("subapp", "diag_router")
-	diagRouter := mux.NewRouter()
+	diagRouter := httptrace.NewServeMux()
 	diagRouter.HandleFunc("/debug/vars", expvar.Handler().ServeHTTP)
 	diagRouter.HandleFunc("/gc", func(
 		w http.ResponseWriter, _ *http.Request) {
@@ -48,6 +64,10 @@ func main() {
 	})
 	diagRouter.HandleFunc("/health", func(
 		w http.ResponseWriter, _ *http.Request) {
+		err := c.Incr("health_calls", []string{}, 1)
+		if err != nil {
+			diagLogger.Errorw("Cannot inc health")
+		}
 		diagLogger.Info("Health was called")
 		w.WriteHeader(http.StatusOK)
 	})
@@ -89,7 +109,7 @@ func main() {
 	timeout, cancelFunc := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancelFunc()
 
-	err := server.Shutdown(timeout)
+	err = server.Shutdown(timeout)
 	if err != nil {
 		sugar.Errorw("The bussines logic is stoped with error", "err", err)
 	}
